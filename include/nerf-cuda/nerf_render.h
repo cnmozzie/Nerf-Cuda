@@ -38,13 +38,10 @@ class NerfRender {
   void reset_network();  // reset the network according to the network config.
 
   // render !
-  void render_frame(
-      struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
-      Eigen::Vector2i resolution);  // render an image according to camera inner
-                                    // parameters and outer parameters.
+  void render_frame(int w, int h, float theta, float phi, float radius);  // render an image according to camera outer parameters.
 
-  void generate_rays(struct Camera cam, Eigen::Matrix<float, 4, 4> pos,
-                     Eigen::Vector2i resolution,
+  void generate_rays(int w, int h, float focal,
+                     Eigen::Matrix<float, 4, 4> c2w,
                      tcnn::GPUMatrixDynamic<float>& rays_o,
                      tcnn::GPUMatrixDynamic<float>& rays_d);
 
