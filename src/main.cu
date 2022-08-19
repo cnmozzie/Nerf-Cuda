@@ -23,6 +23,8 @@
 #include <args/args.hxx>
 #include <iostream>
 #include <string>
+#include <torch/script.h> // One-stop header
+#include <torch/torch.h>
 
 using namespace args;
 using namespace std;
@@ -52,7 +54,7 @@ void printDeviceProp(const cudaDeviceProp& prop) {
 
 __global__ void add_one(float* data, const int N = 5) {
   const int index = threadIdx.x + blockIdx.x * blockDim.x;
-  if (index > N) {
+  if (index >= N) {
     return;
   }
   data[index] += 1;
@@ -71,9 +73,25 @@ __global__ void matrix_add_one(MatrixView<float> data, const int M = 5,
 int main(int argc, char** argv) {
 
   cout << "Hello, Metavese!" << endl;
-  
+
+  torch::jit::script::Module voxels_dict = torch::jit::load("voxels_dict.pt");
+  torch::Tensor index_voxels_coarse = voxels_dict.attr("index_voxels_coarse").toTensor();
+  torch::Tensor sigma_voxels_coarse = voxels_dict.attr("sigma_voxels_coarse").toTensor();
+  torch::Tensor voxels_fine = voxels_dict.attr("voxels_fine").toTensor();
+  cout << index_voxels_coarse.sizes() << endl;
+  cout << sigma_voxels_coarse.sizes() << endl;
+  cout << voxels_fine.sizes() << endl;
+
+  const int64_t *cg_s = index_voxels_coarse.sizes().data();
+  const int64_t *fg_s = voxels_fine.sizes().data();
+
+  long* index_voxels_coarse_h = index_voxels_coarse.data<long>();
+  float* sigma_voxels_coarse_h = sigma_voxels_coarse.data<float>();
+  float* voxels_fine_h = voxels_fine.data<float>();
+
   NerfRender* render = new NerfRender();
   
+  render->load_nerf_tree(index_voxels_coarse_h, sigma_voxels_coarse_h, voxels_fine_h, cg_s, fg_s);
   
   render->render_frame(200, 200, 90, -30, 4);
 

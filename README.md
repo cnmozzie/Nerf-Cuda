@@ -9,7 +9,7 @@ This project achieves NeRF rendering based on C++, Cuda and some open source pac
 ```shell
 $ mkdir build
 $ cd build
-$ cmake ..
+$ cmake -DCMAKE_PREFIX_PATH=/absolute/path/to/libtorch ..
 $ make -j16
 ```
 In another way, you can just run "source build.sh". After compiling, you can run ./build/testbed for testing.

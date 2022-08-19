@@ -82,6 +82,13 @@ list(APPEND CUDA_NVCC_FLAGS "--expt-relaxed-constexpr")
 # Dependencies
 ###############################################################################
 
+############
+# libtorch #
+############
+
+find_package(Torch REQUIRED)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+
 ################
 # tiny-cuda-nn #
 ################
@@ -273,9 +280,11 @@ target_compile_options(ngp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}
 target_compile_definitions(ngp PUBLIC ${NGP_DEFINITIONS} ${TCNN_DEFINITIONS})
 
 add_executable(testbed src/main.cu)
-target_link_libraries(testbed PUBLIC ngp)
+target_link_libraries(testbed PUBLIC ngp "${TORCH_LIBRARIES}")
 target_compile_options(testbed PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_NVCC_FLAGS}>)
 target_compile_definitions(testbed PUBLIC ${NGP_DEFINITIONS} ${TCNN_DEFINITIONS})
+
+set_property(TARGET testbed PROPERTY CXX_STANDARD 14)
 
 # Copy DLSS shared libraries
 if (NGP_VULKAN)

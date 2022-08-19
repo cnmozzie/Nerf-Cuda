@@ -32,7 +32,11 @@ class NerfRender {
 
   // load network
   // need to do : load pretrained model !
-  void reload_network_from_file(const std::string& network_config_path);
+  void load_nerf_tree(long* index_voxels_coarse_h,
+                      float* sigma_voxels_coarse_h,
+                      float* voxels_fine_h,
+                      const int64_t* cg_s,
+                      const int64_t* fg_s);
   nlohmann::json load_network_config(
       const filesystem::path& network_config_path);
   void reset_network();  // reset the network according to the network config.
@@ -45,6 +49,13 @@ class NerfRender {
                      tcnn::GPUMatrixDynamic<float>& rays_o,
                      tcnn::GPUMatrixDynamic<float>& rays_d);
 
+  void render_rays(int N_rays,
+                   tcnn::GPUMatrixDynamic<float>& rays_o,
+                   tcnn::GPUMatrixDynamic<float>& rays_d,
+                   int N_samples, 
+                   int N_importance, 
+                   float perturb);
+  
   void generate_density_grid();
   void load_snapshot(const std::string& filepath_string);
 
@@ -59,12 +70,12 @@ class NerfRender {
   tcnn::pcg32 m_rng;
 
   // density grid parameter !
-  int m_dg_cascade = 1;
-  int m_dg_h = 128;
-  float m_dg_threshould_l = 1.e-4;
-  float mean_density = 0.7;
+  Eigen::Vector3i m_cg_s;
+  Eigen::Matrix<int,5,1> m_fg_s;
 
-  tcnn::GPUMemory<float> m_density_grid;
+  tcnn::GPUMemory<long> m_index_voxels_coarse;
+  tcnn::GPUMemory<float> m_sigma_voxels_coarse;
+  tcnn::GPUMemory<float> m_voxels_fine;
   // CASCADE * H * H * H * size_of(float),
   // index calculation : cascade_level * H * H * H + nx * H * H + ny * H + nz
 
