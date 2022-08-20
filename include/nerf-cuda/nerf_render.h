@@ -37,9 +37,6 @@ class NerfRender {
                       float* voxels_fine_h,
                       const int64_t* cg_s,
                       const int64_t* fg_s);
-  nlohmann::json load_network_config(
-      const filesystem::path& network_config_path);
-  void reset_network();  // reset the network according to the network config.
 
   // render !
   void render_frame(int w, int h, float theta, float phi, float radius);  // render an image according to camera outer parameters.
@@ -50,13 +47,19 @@ class NerfRender {
                      tcnn::GPUMatrixDynamic<float>& rays_d);
 
   void render_rays(int N_rays,
+                   tcnn::GPUMatrixDynamic<float>& rgb_fine,
                    tcnn::GPUMatrixDynamic<float>& rays_o,
                    tcnn::GPUMatrixDynamic<float>& rays_d,
                    int N_samples, 
                    int N_importance, 
                    float perturb);
   
-  void generate_density_grid();
+  void inference(int N_rays, int N_samples_,
+                 tcnn::GPUMatrixDynamic<float>& rgb_fine,
+                 tcnn::GPUMatrixDynamic<float>& xyz_,
+                 tcnn::GPUMatrixDynamic<float>& dir_,
+                 tcnn::GPUMemory<float>& z_vals,
+                 tcnn::GPUMemory<float>& weights_coarse);
   void load_snapshot(const std::string& filepath_string);
 
  private:

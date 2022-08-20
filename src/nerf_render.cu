@@ -73,7 +73,7 @@ Eigen::Matrix<float, 4, 4> pose_spherical(float theta, float phi, float radius) 
 }
 
 // line 229-249 @ efficient-nerf-render-demo/example-app/example-app.cpp
-__global__ void set_z_vals(float* z_vals, const int N ) {
+__global__ void set_z_vals(float* z_vals, const int N) {
   const int index = threadIdx.x + blockIdx.x * blockDim.x;
   if (index >= N) {
     return;
@@ -84,23 +84,72 @@ __global__ void set_z_vals(float* z_vals, const int N ) {
 }
 
 // line 251-254 @ efficient-nerf-render-demo/example-app/example-app.cpp
-__global__ void set_xyz_coarse(MatrixView<float> xyz_coarse, 
-                               MatrixView<float> rays_o,
-                               MatrixView<float> rays_d,
-                               float* z_vals, 
-                               int N_rays, 
-                               int N_samples_coarse) {
+__global__ void set_xyz(MatrixView<float> xyz, 
+                        MatrixView<float> rays_o,
+                        MatrixView<float> rays_d,
+                        float* z_vals, 
+                        int N_rays, 
+                        int N_samples) {
   const int i = threadIdx.x + blockIdx.x * blockDim.x;
   const int j = threadIdx.y + blockIdx.y * blockDim.y;
-  if (i >= N_rays || j >= N_samples_coarse) {
+  if (i >= N_rays || j >= N_samples) {
     return;
   }
-  xyz_coarse(i*N_samples_coarse+j, 0) = rays_o(i, 0) + z_vals[j] * rays_d(i, 0);
-  xyz_coarse(i*N_samples_coarse+j, 1) = rays_o(i, 1) + z_vals[j] * rays_d(i, 1);
-  xyz_coarse(i*N_samples_coarse+j, 2) = rays_o(i, 2) + z_vals[j] * rays_d(i, 2);
+  xyz(i*N_samples+j, 0) = rays_o(i, 0) + z_vals[j] * rays_d(i, 0);
+  xyz(i*N_samples+j, 1) = rays_o(i, 1) + z_vals[j] * rays_d(i, 1);
+  xyz(i*N_samples+j, 2) = rays_o(i, 2) + z_vals[j] * rays_d(i, 2);
+}
+
+// line 128-137 @ efficient-nerf-render-demo/example-app/example-app.cpp
+__global__ void calc_index_coarse(MatrixView<int> ijk_coarse, MatrixView<float> xyz, int grid_coarse, const int N) {
+  const int index = threadIdx.x + blockIdx.x * blockDim.x;
+  if (index >= N) {
+    return;
+  }
+  float coord_scope = 3.0;
+  float xyz_min = -coord_scope;
+  float xyz_max = coord_scope;
+  float xyz_scope = xyz_max - xyz_min;
+
+  for (int i=0; i<3; i++) {
+    ijk_coarse(index, i) = int((xyz(index, i) - xyz_min) / xyz_scope * grid_coarse);
+    ijk_coarse(index, i) = ijk_coarse(index, i) < 0? 0 : ijk_coarse(index, i);
+    ijk_coarse(index, i) = ijk_coarse(index, i) > grid_coarse-1? grid_coarse-1 : ijk_coarse(index, i);
+  }
+
+}
+
+__global__ void query_coarse_sigma(float* sigmas, float* sigma_voxels_coarse, MatrixView<int> ijk_coarse, Eigen::Vector3i cg_s, const int N) {
+  const int index = threadIdx.x + blockIdx.x * blockDim.x;
+  if (index >= N) {
+    return;
+  }
+  int x = ijk_coarse(index, 0);
+  int y = ijk_coarse(index, 1);
+  int z = ijk_coarse(index, 2);
+  sigmas[index] = sigma_voxels_coarse[x*cg_s[1]*cg_s[2] + y*cg_s[2] + z];
+}
+
+void sigma2weights(tcnn::GPUMemory<float>& weights,
+                   tcnn::GPUMemory<float>& z_vals,
+                   tcnn::GPUMemory<float>& sigmas) {
+  // TODO
+  // line 258-261 @ efficient-nerf-render-demo/example-app/example-app.cpp
+  // use cuda to speed up
+  std::cout << "sigma2weights" << std::endl;
+}
+
+void NerfRender::inference(int N_rays, int N_samples_,
+                           tcnn::GPUMatrixDynamic<float>& rgb_fine,
+                           tcnn::GPUMatrixDynamic<float>& xyz_,
+                           tcnn::GPUMatrixDynamic<float>& dir_,
+                           tcnn::GPUMemory<float>& z_vals,
+                           tcnn::GPUMemory<float>& weights_coarse) {
+  std::cout << "inference" << std::endl;
 }
 
 void NerfRender::render_rays(int N_rays,
+                             tcnn::GPUMatrixDynamic<float>& rgb_fine,
                              tcnn::GPUMatrixDynamic<float>& rays_o,
                              tcnn::GPUMatrixDynamic<float>& rays_d,
                              int N_samples=128, 
@@ -110,16 +159,35 @@ void NerfRender::render_rays(int N_rays,
   int N_samples_coarse = N_samples;
   tcnn::GPUMemory<float> z_vals_coarse(N_samples_coarse);
   set_z_vals<<<div_round_up(N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (z_vals_coarse.data(), N_samples_coarse);
+  int N_samples_fine = N_samples * N_importance;
+  tcnn::GPUMemory<float> z_vals_fine(N_samples_fine);
+  set_z_vals<<<div_round_up(N_samples_fine, maxThreadsPerBlock), maxThreadsPerBlock>>> (z_vals_fine.data(), N_samples_fine);
 
   tcnn::GPUMatrixDynamic<float> xyz_coarse(N_rays*N_samples_coarse, 3, tcnn::RM);
   dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
-  dim3 numBlocks(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_coarse, int(threadsPerBlock.y)));
-  set_xyz_coarse<<<numBlocks, threadsPerBlock>>>(xyz_coarse.view(), rays_o.view(), rays_d.view(), z_vals_coarse.data(), N_rays, N_samples_coarse);
+  dim3 numBlocks_coarse(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_coarse, int(threadsPerBlock.y)));
+  set_xyz<<<numBlocks_coarse, threadsPerBlock>>>(xyz_coarse.view(), rays_o.view(), rays_d.view(), z_vals_coarse.data(), N_rays, N_samples_coarse);
+
+  tcnn::GPUMatrixDynamic<float> xyz_fine(N_rays*N_samples_fine, 3, tcnn::RM);
+  dim3 numBlocks_fine(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_fine, int(threadsPerBlock.y)));
+  set_xyz<<<numBlocks_fine, threadsPerBlock>>>(xyz_fine.view(), rays_o.view(), rays_d.view(), z_vals_fine.data(), N_rays, N_samples_fine);
+
+  // line 155-161 @ efficient-nerf-render-demo/example-app/example-app.cpp
+  tcnn::GPUMatrixDynamic<int> ijk_coarse(N_rays*N_samples_coarse, 3, tcnn::RM);
+  calc_index_coarse<<<div_round_up(N_rays*N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (ijk_coarse.view(), xyz_coarse.view(), m_cg_s[0], N_rays*N_samples_coarse);
+  tcnn::GPUMemory<float> sigmas(N_rays*N_samples_coarse);
+  query_coarse_sigma<<<div_round_up(N_rays*N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (sigmas.data(), m_sigma_voxels_coarse.data(), ijk_coarse.view(), m_cg_s, N_rays*N_samples_coarse);
+
+  // line 261 @ efficient-nerf-render-demo/example-app/example-app.cpp
+  tcnn::GPUMemory<float> weights_coarse(N_rays*N_samples_coarse);
+  sigma2weights(weights_coarse, z_vals_coarse, sigmas);
+
+  inference(N_rays, N_samples_fine, rgb_fine, xyz_fine, rays_d, z_vals_fine, weights_coarse);
 
   
-  float host_data[N_samples_coarse];
-  z_vals_coarse.copy_to_host(host_data);
-  std::cout << host_data[0] << " " << host_data[1] << " " << host_data[2] << std::endl;
+  //float host_data[N_samples_fine];
+  //z_vals_fine.copy_to_host(host_data);
+  //std::cout << host_data[0] << " " << host_data[1] << " " << host_data[2] << std::endl;
 }
 
 void NerfRender::generate_rays(int w,
@@ -145,7 +213,8 @@ void NerfRender::render_frame(int w, int h, float theta, float phi, float radius
 
   generate_rays(w, h, focal, c2w, rays_o, rays_d);
 
-  render_rays(N, rays_o, rays_d, 128);
+  tcnn::GPUMatrixDynamic<float> rgb_fine(N, 3, tcnn::RM);
+  render_rays(N, rgb_fine, rays_o, rays_d, 128);
 
 }
 
