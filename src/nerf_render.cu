@@ -139,6 +139,26 @@ void sigma2weights(tcnn::GPUMemory<float>& weights,
   std::cout << "sigma2weights" << std::endl;
 }
 
+__global__ void sum_rgbs(MatrixView<float> rgb_final, MatrixView<float> rgbs, float* weights, int N_samples, const int N) {
+  const int i = threadIdx.x + blockIdx.x * blockDim.x;
+  if (i >= N) {
+    return;
+  }
+  float weights_sum = 0;
+  rgb_final(i, 0) = 0;
+  rgb_final(i, 1) = 0;
+  rgb_final(i, 2) = 0;
+  for (int j=0; j<N_samples; j++) {
+    weights_sum += weights[i*N_samples+j];
+    rgb_final(i, 0) += weights[i*N_samples+j] * rgbs(i*N_samples+j, 0);
+    rgb_final(i, 1) += weights[i*N_samples+j] * rgbs(i*N_samples+j, 1);
+    rgb_final(i, 2) += weights[i*N_samples+j] * rgbs(i*N_samples+j, 2);
+  }
+  rgb_final(i, 0) = rgb_final(i, 0) + 1 - weights_sum;
+  rgb_final(i, 1) = rgb_final(i, 1) + 1 - weights_sum;
+  rgb_final(i, 2) = rgb_final(i, 2) + 1 - weights_sum;
+}
+
 void NerfRender::inference(int N_rays, int N_samples_,
                            tcnn::GPUMatrixDynamic<float>& rgb_fine,
                            tcnn::GPUMatrixDynamic<float>& xyz_,
@@ -146,6 +166,17 @@ void NerfRender::inference(int N_rays, int N_samples_,
                            tcnn::GPUMemory<float>& z_vals,
                            tcnn::GPUMemory<float>& weights_coarse) {
   std::cout << "inference" << std::endl;
+  tcnn::GPUMatrixDynamic<float> rgbs(N_rays*N_samples_, 3, tcnn::RM);
+  tcnn::GPUMemory<float> sigmas(N_rays*N_samples_);
+  // TODO
+  // line 263-271 & 186-206 @ efficient-nerf-render-demo/example-app/example-app.cpp
+  // use cuda to speed up
+
+  tcnn::GPUMemory<float> weights(N_rays*N_samples_);
+  sigma2weights(weights, z_vals, sigmas);
+
+  sum_rgbs<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>> (rgb_fine.view(), rgbs.view(), weights.data(), N_samples_, N_rays);
+
 }
 
 void NerfRender::render_rays(int N_rays,
@@ -215,6 +246,10 @@ void NerfRender::render_frame(int w, int h, float theta, float phi, float radius
 
   tcnn::GPUMatrixDynamic<float> rgb_fine(N, 3, tcnn::RM);
   render_rays(N, rgb_fine, rays_o, rays_d, 128);
+
+  // TODO
+  // line 378-390 @ Nerf-Cuda/src/nerf_render.cu
+  // save array as a picture
 
 }
 
