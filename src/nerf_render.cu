@@ -30,6 +30,33 @@ namespace fs = filesystem;
 
 NGP_NAMESPACE_BEGIN
 
+Eigen::Matrix<float, 4, 4> trans_t(double t){
+  Eigen::Matrix<float, 4, 4> mat;
+  mat << 1.0, 0.0, 0.0, 0.0,
+         0.0, 1.0, 0.0, 0.0,
+         0.0, 0.0, 1.0, t,
+         0.0, 0.0, 0.0, 1.0;
+  return mat;
+}
+
+Eigen::Matrix<float, 4, 4> rot_phi(double phi){
+  Eigen::Matrix<float, 4, 4> mat;
+  mat << 1.0, 0.0, 0.0, 0.0,
+         0.0, cos(phi), -sin(phi), 0.0,
+         0.0, sin(phi),  cos(phi), 0.0,
+         0.0, 0.0, 0.0, 1.0;
+  return mat;
+}
+
+Eigen::Matrix<float, 4, 4> rot_theta(double th){
+  Eigen::Matrix<float, 4, 4> mat;
+  mat << cos(th), 0.0, -sin(th), 0.0,
+         0.0, 1.0, 0.0, 0.0,
+         sin(th), 0.0,  cos(th), 0.0,
+         0.0, 0.0, 0.0, 1.0;
+  return mat;
+}
+
 NerfRender::NerfRender() {
   std::cout << "Hello, NerfRender!" << std::endl;
 }
@@ -67,8 +94,15 @@ void NerfRender::load_nerf_tree(long* index_voxels_coarse_h,
 
 Eigen::Matrix<float, 4, 4> pose_spherical(float theta, float phi, float radius) {
   Eigen::Matrix<float, 4, 4> c2w;
-  // TODO
-  // line 90 @ efficient-nerf-render-demo/example-app/example-app.cpp
+  c2w = trans_t(radius);
+  c2w = rot_phi(phi/180.*PI)*c2w;
+  c2w = rot_theta(theta/180.*PI)*c2w;
+  Eigen::Matrix<float, 4, 4> temp_mat;
+  temp_mat << -1., 0., 0., 0.,
+               0., 0., 1., 0.,
+               0., 1., 0., 0.,
+               0., 0., 0., 1.; 
+  c2w = temp_mat*c2w; 
   return c2w;
 }
 
@@ -100,6 +134,36 @@ __global__ void set_xyz_coarse(MatrixView<float> xyz_coarse,
   xyz_coarse(i*N_samples_coarse+j, 2) = rays_o(i, 2) + z_vals[j] * rays_d(i, 2);
 }
 
+__global__ void set_dir(int w, int h, float focal, Eigen::Matrix<float, 4, 4> c2w, MatrixView<float> rays_o, MatrixView<float> rays_d){
+  const int i = threadIdx.x + blockIdx.x * blockDim.x;   // h*w
+  const int j = threadIdx.y + blockIdx.y * blockDim.y;   // w
+  Eigen::Matrix<float, h, w, 3> dirs;
+  if( i >= h*w || j>= w){
+    return;
+  }
+  dirs((int)(i / w), j, 0) = (float)((int)(i / w) - w/2) / focal;
+  dirs((int)(i / w), j, 1) = (float)(j - h/2) / focal;
+  dirs((int)(i / w), j ,2) = -1;
+  float sum =  dirs((int)(i / w), j, 0) ^ 2 + dirs((int)(i / w), j, 1) ^ 2 + dirs((int)(i / w), j, 2) ^ 2;
+  dirs((int)(i / w), j, 0) /= sum;
+  dirs((int)(i / w), j, 1) /= sum;
+  dirs((int)(i / w), j, 2) /= sum;
+
+  // get_rays 
+  rays_d((int)(i / w) * w + j, 0) = c2w(0, 0) * dirs((int)(i / w), j, 0) \
+                                  + c2w(0, 1) * dirs((int)(i / w), j, 1) \
+                                  + c2w(0, 2) * dirs((int)(i / w), j, 2);
+  rays_d((int)(i / w) * w + j, 1) = c2w(1, 0) * dirs((int)(i / w), j, 0) \
+                                  + c2w(1, 1) * dirs((int)(i / w), j, 1) \
+                                  + c2w(1, 2) * dirs((int)(i / w), j, 2);
+  rays_d((int)(i / w) * w + j, 2) = c2w(2, 0) * dirs((int)(i / w), j, 0) \
+                                  + c2w(2, 1) * dirs((int)(i / w), j, 1) \
+                                  + c2w(2, 2) * dirs((int)(i / w), j, 2);
+  rays_d((int)(i / w) * w + j, 0) = c2w(0, 3);
+  rays_d((int)(i / w) * w + j, 1) = c2w(1, 3);
+  rays_d((int)(i / w) * w + j, 2) = c2w(2, 3);
+} 
+
 void NerfRender::render_rays(int N_rays,
                              tcnn::GPUMatrixDynamic<float>& rays_o,
                              tcnn::GPUMatrixDynamic<float>& rays_d,
@@ -115,15 +179,14 @@ void NerfRender::render_rays(int N_rays,
   dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
   dim3 numBlocks(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_coarse, int(threadsPerBlock.y)));
   set_xyz_coarse<<<numBlocks, threadsPerBlock>>>(xyz_coarse.view(), rays_o.view(), rays_d.view(), z_vals_coarse.data(), N_rays, N_samples_coarse);
-
   
   float host_data[N_samples_coarse];
   z_vals_coarse.copy_to_host(host_data);
   std::cout << host_data[0] << " " << host_data[1] << " " << host_data[2] << std::endl;
 }
 
-void NerfRender::generate_rays(int w,
-                               int h,
+void NerfRender::generate_rays(int w = 200,
+                               int h = 200,
                                float focal,
                                Eigen::Matrix<float, 4, 4> c2w,
                                tcnn::GPUMatrixDynamic<float>& rays_o,
@@ -131,6 +194,9 @@ void NerfRender::generate_rays(int w,
   // TODO
   // line 287-292 @ efficient-nerf-render-demo/example-app/example-app.cpp
   // use cuda to speed up
+  dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
+  dim3 numBlocks(div_round_up(w * h, int(threadsPerBlock.x)), div_round_up(w, int(threadsPerBlock.y)));
+  set_dir<<<numBlocks, threadsPerBlock>>>(w, h, focal, c2w, rays_o.view(), rays_d.view());
   tlog::info() << c2w;
 }
 
