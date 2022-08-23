@@ -206,12 +206,52 @@ __global__ void set_dir(int w, int h, float focal, Eigen::Matrix<float, 4, 4> c2
   rays_o((int)(i / w) * w + j, 2) = c2w(2, 3);
 }
 
+__global__ void get_alphas(int len_z, float* z_vals, float* sigmas, float* alphas){
+  const int index = threadIdx.x + blockIdx.x * blockDim.x;
+  if(index > len_z){
+    return;
+  }
+  float delta_coarse;
+  if(index < len_z) 
+    delta_coarse = z_vals[index + 1] - z_vals[index];
+  if(index == len_z)
+    delta_coarse = 1e5;
+  float alpha = 1.0 - exp(-delta_coarse * log(1 + std::exp(sigmas[index])));
+  alpha = 1.0 - alpha + 1e-10;
+  alphas[index] = alpha;
+}
+
+__global__ void get_cumprod(int len_z, float* alphas, float* alphas_cumprod){
+  alphas[0] = 1.0;
+  float cumprod = 1.0;
+  for(int i = 0; i < len_z; i++){
+    cumprod = cumprod * alphas[i];
+    alphas_cumprod[i + 1] = cumprod;
+  }
+}
+
+__global__ void get_weights(int len_z, float* alphas, float* alphas_cumprod, float* weights){
+  const int index = threadIdx.x + blockIdx.x * blockDim.x;
+  if(index >= len_z){
+    return;
+  }
+  weights[index] = alphas[index] * alphas_cumprod[index];
+}
+
 void sigma2weights(tcnn::GPUMemory<float>& weights,
                    tcnn::GPUMemory<float>& z_vals,
                    tcnn::GPUMemory<float>& sigmas) {
   // TODO
   // line 258-261 @ efficient-nerf-render-demo/example-app/example-app.cpp
   // use cuda to speed up
+  int len_z = z_vals.size();
+  std::cout << "len_z:" << len_z << std::endl;
+  tcnn::GPUMemory<float> alphas(len_z);
+  tcnn::GPUMemory<float> alphas_cumprod(len_z + 1);
+  get_alphas<<<div_round_up(len_z, maxThreadsPerBlock), maxThreadsPerBlock>>>(len_z, z_vals.data(), sigmas.data(), alphas.data());
+  std::cout << "get alphas" << std::endl;
+  get_cumprod<<<1, 1>>>(len_z, alphas.data(), alphas_cumprod.data());
+  get_weights<<<div_round_up(len_z, maxThreadsPerBlock), maxThreadsPerBlock>>>(len_z, alphas.data(), alphas_cumprod.data(), weights.data());
   std::cout << "sigma2weights" << std::endl;
 }
 
