@@ -206,52 +206,70 @@ __global__ void set_dir(int w, int h, float focal, Eigen::Matrix<float, 4, 4> c2
   rays_o((int)(i / w) * w + j, 2) = c2w(2, 3);
 }
 
-__global__ void get_alphas(int len_z, float* z_vals, float* sigmas, float* alphas){
-  const int index = threadIdx.x + blockIdx.x * blockDim.x;
-  if(index > len_z){
+__global__ void get_alphas(const int N_rays, const int N_samples, float* z_vals, float* sigmas, float* alphas){
+  const int i = threadIdx.x + blockIdx.x * blockDim.x;   // N_rays
+  const int j = threadIdx.y + blockIdx.y * blockDim.y;   // N_samples
+  if(i >= N_rays){
+    return;
+  }
+  if(j >= N_samples){
     return;
   }
   float delta_coarse;
-  if(index < len_z) 
-    delta_coarse = z_vals[index + 1] - z_vals[index];
-  if(index == len_z)
+  if(j < N_samples-1) 
+    delta_coarse = z_vals[j+1] - z_vals[j];
+  if(j == N_samples-1)
     delta_coarse = 1e5;
-  float alpha = 1.0 - exp(-delta_coarse * log(1 + std::exp(sigmas[index])));
+  float alpha = 1.0 - exp(-delta_coarse * log(1 + std::exp(sigmas[i * N_samples + j])));
   alpha = 1.0 - alpha + 1e-10;
-  alphas[index] = alpha;
+  alphas[i * N_samples + j] = alpha;
 }
 
-__global__ void get_cumprod(int len_z, float* alphas, float* alphas_cumprod){
-  alphas[0] = 1.0;
-  float cumprod = 1.0;
-  for(int i = 0; i < len_z; i++){
-    cumprod = cumprod * alphas[i];
-    alphas_cumprod[i + 1] = cumprod;
-  }
-}
-
-__global__ void get_weights(int len_z, float* alphas, float* alphas_cumprod, float* weights){
-  const int index = threadIdx.x + blockIdx.x * blockDim.x;
-  if(index >= len_z){
+__global__ void get_cumprod(const int N_rays, const int N_samples, float* alphas, float* alphas_cumprod){
+  const int j = threadIdx.x + blockIdx.x * blockDim.x;   // N_rays
+  if(j >= N_rays){
     return;
   }
-  weights[index] = alphas[index] * alphas_cumprod[index];
+  alphas[j*N_samples+0] = 1.0;
+  float cumprod = 1.0;
+  for(int i=0; i<N_samples; i++){
+    cumprod = cumprod * alphas[j*N_samples+i];
+    alphas_cumprod[j*N_samples+i+1] = cumprod;
+  }
 }
 
-void sigma2weights(tcnn::GPUMemory<float>& weights,
-                   tcnn::GPUMemory<float>& z_vals,
-                   tcnn::GPUMemory<float>& sigmas) {
+__global__ void get_weights(const int N_rays, const int N_samples, float* alphas, float* alphas_cumprod, float* weights){
+  const int i = threadIdx.x + blockIdx.x * blockDim.x;   // N_rays
+  const int j = threadIdx.y + blockIdx.y * blockDim.y;   // N_samples
+  if(i >= N_rays){
+    return;
+  }
+  if(j >= N_samples){
+    return;
+  }
+  weights[i*N_samples+j] = alphas[i*N_samples+j] * alphas_cumprod[i*N_samples+j];
+}
+
+void sigma2weights(tcnn::GPUMemory<float>& weights,    // N_rays*N_samples
+                   tcnn::GPUMemory<float>& z_vals,     // N_samples
+                   tcnn::GPUMemory<float>& sigmas) {   // N_rays*N_samples
   // TODO
   // line 258-261 @ efficient-nerf-render-demo/example-app/example-app.cpp
   // use cuda to speed up
-  int len_z = z_vals.size();
-  std::cout << "len_z:" << len_z << std::endl;
-  tcnn::GPUMemory<float> alphas(len_z);
-  tcnn::GPUMemory<float> alphas_cumprod(len_z + 1);
-  get_alphas<<<div_round_up(len_z, maxThreadsPerBlock), maxThreadsPerBlock>>>(len_z, z_vals.data(), sigmas.data(), alphas.data());
+  int N_samples = z_vals.size();
+  int N_rays = weights.size() / N_samples;
+  std::cout << "N_samples:" << N_samples << std::endl;
+  std::cout << "N_rays:" << N_rays << std::endl;
+  tcnn::GPUMemory<float> alphas(N_samples*N_rays);
+  tcnn::GPUMemory<float> alphas_cumprod((N_samples + 1)*N_rays);
+  
+  dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
+  dim3 numBlocks(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples, int(threadsPerBlock.y)));
+  get_alphas<<<numBlocks, threadsPerBlock>>>(N_rays, N_samples, z_vals.data(), sigmas.data(), alphas.data());
+
   std::cout << "get alphas" << std::endl;
-  get_cumprod<<<1, 1>>>(len_z, alphas.data(), alphas_cumprod.data());
-  get_weights<<<div_round_up(len_z, maxThreadsPerBlock), maxThreadsPerBlock>>>(len_z, alphas.data(), alphas_cumprod.data(), weights.data());
+  get_cumprod<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>>(N_rays, N_samples, alphas.data(), alphas_cumprod.data());
+  get_weights<<<numBlocks, threadsPerBlock>>>(N_rays, N_samples, alphas.data(), alphas_cumprod.data(), weights.data());
   std::cout << "sigma2weights" << std::endl;
 }
 
@@ -279,7 +297,7 @@ void NerfRender::inference(int N_rays, int N_samples_,
                            tcnn::GPUMatrixDynamic<float>& rgb_fine,
                            tcnn::GPUMatrixDynamic<float>& xyz_,
                            tcnn::GPUMatrixDynamic<float>& dir_,
-                           tcnn::GPUMemory<float>& z_vals,
+                           tcnn::GPUMemory<float>& z_vals,    
                            tcnn::GPUMemory<float>& weights_coarse) {
   std::cout << "inference" << std::endl;
   tcnn::GPUMatrixDynamic<float> rgbs(N_rays*N_samples_, 3, tcnn::RM);
@@ -290,9 +308,7 @@ void NerfRender::inference(int N_rays, int N_samples_,
 
   tcnn::GPUMemory<float> weights(N_rays*N_samples_);
   sigma2weights(weights, z_vals, sigmas);
-
   sum_rgbs<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>> (rgb_fine.view(), rgbs.view(), weights.data(), N_samples_, N_rays);
-
 }
 
 void NerfRender::render_rays(int N_rays,
@@ -352,6 +368,16 @@ void NerfRender::generate_rays(int w,
   tlog::info() << c2w;
 }
 
+__global__ void get_image(MatrixView<float> rgb_final, const int N, float* rgbs){
+  const int i = threadIdx.x + blockIdx.x * blockDim.x;  // N
+  if(i >= N){
+    return;
+  }
+  rgbs[i * 3] = rgb_final(i, 0);
+  rgbs[i * 3 + 1] = rgb_final(i, 1);
+  rgbs[i * 3 + 2] = rgb_final(i, 2);
+}
+
 void NerfRender::render_frame(int w, int h, float theta, float phi, float radius) {
   auto c2w = pose_spherical(90, -30, 4);
   float focal = 0.5 * w / std::tan(0.5*0.6911112070083618);
@@ -365,11 +391,31 @@ void NerfRender::render_frame(int w, int h, float theta, float phi, float radius
 
   tcnn::GPUMatrixDynamic<float> rgb_fine(N, 3, tcnn::RM);
   render_rays(N, rgb_fine, rays_o, rays_d, 128);
-
   // TODO
   // line 378-390 @ Nerf-Cuda/src/nerf_render.cu
   // save array as a picture
+  
+  float* rgbs_host = new float[N * 3];
+  float* rgbs_dev; 
+  cudaMalloc((void **)&rgbs_dev, sizeof(float) * N * 3);
+  //cudaMemcpy(rgbs_dev, rgbs_host, sizeof(unsigned int) * N * 3, cudaMemcpyHostToDevice);
 
+  get_image<<<div_round_up(N, maxThreadsPerBlock), maxThreadsPerBlock>>>(rgb_fine.view(), N, rgbs_dev);
+  cudaMemcpy(rgbs_host, rgbs_dev, sizeof(unsigned int)*N*3, cudaMemcpyDeviceToHost);
+  
+  const char* filepath = "test.png";
+  stbi_write_png(filepath, h, w, 3, rgbs_host, 0);
+  FILE * fp;
+  if((fp = fopen("rgb.txt","wb"))==NULL){
+    printf("cant open the file");
+    exit(0);
+  }
+  for(int i = 0; i < N; i++){
+    fprintf(fp, "%f ", rgbs_host[i]);
+  }
+  fclose(fp);
+
+  delete[] rgbs_host, rgbs_dev;
 }
 
 NGP_NAMESPACE_END
