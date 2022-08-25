@@ -54,12 +54,13 @@ class NerfRender {
                    int N_importance, 
                    float perturb);
   
-  void inference(int N_rays, int N_samples_,
+  void inference(int N_rays, int N_samples_, int N_importance,
                  tcnn::GPUMatrixDynamic<float>& rgb_fine,
                  tcnn::GPUMatrixDynamic<float>& xyz_,
                  tcnn::GPUMatrixDynamic<float>& dir_,
                  tcnn::GPUMemory<float>& z_vals,
-                 tcnn::GPUMemory<float>& weights_coarse);
+                 tcnn::GPUMemory<float>& weights_coarse,
+                 tcnn::GPUMatrixDynamic<int>& ijk_coarse);
   void load_snapshot(const std::string& filepath_string);
 
  private:
