@@ -318,7 +318,6 @@ __global__ void query_fine(MatrixView<float> rgbs,
                            MatrixView<float> xyz_, 
                            MatrixView<float> dir_, 
                            float* weight_threasholds, 
-                           MatrixView<int> ijk_coarse, 
                            long* index_voxels_coarse,
                            float* voxels_fine,
                            Eigen::Vector3i cg_s,
@@ -339,21 +338,28 @@ __global__ void query_fine(MatrixView<float> rgbs,
     return;
   }
 
-  // query_coarse_index
-  int i_ = ijk_coarse(index_coarse, 0);
-  int j_ = ijk_coarse(index_coarse, 1);
-  int k_ = ijk_coarse(index_coarse, 2);
-  int coarse_index = index_voxels_coarse[i_*cg_s[1]*cg_s[2]+j_*cg_s[2]+k_];
-
-  // calc_index_fine
+  // calc_index_coarse
+  
   int grid_coarse = cg_s[0];
-  int grid_fine = 3;
-  int res_fine = grid_coarse * grid_fine;
-
   float coord_scope = 3.0;
   float xyz_min = -coord_scope;
   float xyz_max = coord_scope;
   float xyz_scope = xyz_max - xyz_min;
+
+  int ijk_coarse[3];
+
+  // query_coarse_index
+  for (int i=0; i<3; i++) {
+    ijk_coarse[i] = int((xyz_(index_fine, i) - xyz_min) / xyz_scope * grid_coarse);
+    ijk_coarse[i] = ijk_coarse[i] < 0? 0 : ijk_coarse[i];
+    ijk_coarse[i] = ijk_coarse[i] > grid_coarse-1? grid_coarse-1 : ijk_coarse[i];
+  }
+  int coarse_index = index_voxels_coarse[ijk_coarse[0]*cg_s[1]*cg_s[2]+ijk_coarse[1]*cg_s[2]+ijk_coarse[2]];
+
+  // calc_index_fine
+  
+  int grid_fine = 3;
+  int res_fine = grid_coarse * grid_fine;
 
   int ijk_fine[3];
 
@@ -413,8 +419,7 @@ void NerfRender::inference(int N_rays, int N_samples_, int N_importance,
                            tcnn::GPUMatrixDynamic<float>& xyz_,
                            tcnn::GPUMatrixDynamic<float>& dir_,
                            tcnn::GPUMemory<float>& z_vals,    
-                           tcnn::GPUMemory<float>& weights_coarse,
-                           tcnn::GPUMatrixDynamic<int>& ijk_coarse) {
+                           tcnn::GPUMemory<float>& weights_coarse) {
   std::cout << "inference" << std::endl;
   // TODO
   // line 263-271 & 186-206 @ efficient-nerf-render-demo/example-app/example-app.cpp
@@ -434,7 +439,6 @@ void NerfRender::inference(int N_rays, int N_samples_, int N_importance,
                                                     xyz_.view(), 
                                                     dir_.view(), 
                                                     weight_threasholds.data(), 
-                                                    ijk_coarse.view(), 
                                                     m_index_voxels_coarse.data(),
                                                     m_voxels_fine.data(),
                                                     m_cg_s, m_fg_s,
@@ -504,7 +508,7 @@ void NerfRender::render_rays(int N_rays,
   tcnn::GPUMemory<float> weights_coarse(N_rays*N_samples_coarse);
   sigma2weights(weights_coarse, z_vals_coarse, sigmas);
 
-  inference(N_rays, N_samples_fine, N_importance, rgb_fine, xyz_fine, rays_d, z_vals_fine, weights_coarse, ijk_coarse);
+  inference(N_rays, N_samples_fine, N_importance, rgb_fine, xyz_fine, rays_d, z_vals_fine, weights_coarse);
 
   
   //float host_data[N_samples_fine];

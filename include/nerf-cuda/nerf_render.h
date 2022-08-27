@@ -59,8 +59,7 @@ class NerfRender {
                  tcnn::GPUMatrixDynamic<float>& xyz_,
                  tcnn::GPUMatrixDynamic<float>& dir_,
                  tcnn::GPUMemory<float>& z_vals,
-                 tcnn::GPUMemory<float>& weights_coarse,
-                 tcnn::GPUMatrixDynamic<int>& ijk_coarse);
+                 tcnn::GPUMemory<float>& weights_coarse);
   void load_snapshot(const std::string& filepath_string);
 
  private:
