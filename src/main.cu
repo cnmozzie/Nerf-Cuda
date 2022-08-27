@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
   
   render->load_nerf_tree(index_voxels_coarse_h, sigma_voxels_coarse_h, voxels_fine_h, cg_s, fg_s);
   
-  render->render_frame(200, 200, 90, -30, 4);
+  render->render_frame(800, 800, 90, -30, 4);
 
   int deviceId;
   cudaGetDevice(&deviceId);  // `deviceId` now points to the id of the currently

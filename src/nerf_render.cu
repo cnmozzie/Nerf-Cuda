@@ -317,7 +317,7 @@ __global__ void query_fine(MatrixView<float> rgbs,
                            float* weights_coarse, 
                            MatrixView<float> xyz_, 
                            MatrixView<float> dir_, 
-                           float* weight_threasholds, 
+                           float weight_threashold, 
                            long* index_voxels_coarse,
                            float* voxels_fine,
                            Eigen::Vector3i cg_s,
@@ -332,9 +332,12 @@ __global__ void query_fine(MatrixView<float> rgbs,
     return;
   }
   // line 264 @ efficient-nerf-render-demo/example-app/example-app.cpp
-  if (weights_coarse[index_coarse] < weight_threasholds[i]) {
+  if (weights_coarse[index_coarse] < weight_threashold) {
     float sigma_default = -20.0;
     sigmas[index_fine] = sigma_default;
+    rgbs(index_fine, 0) = 1.0;
+    rgbs(index_fine, 1) = 1.0;
+    rgbs(index_fine, 2) = 1.0;
     return;
   }
 
@@ -372,7 +375,7 @@ __global__ void query_fine(MatrixView<float> rgbs,
 
   const int deg = 2;
   const int dim_sh = (deg + 1) * (deg + 1);
-  int sh[3][dim_sh];
+  float sh[3][dim_sh];
 
   for (int k=0; k<fg_s[4]-1; k++) {
     sh[k/dim_sh][k%dim_sh] = voxels_fine[coarse_index*fg_s[1]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[0]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[1]*fg_s[3]*fg_s[4] + ijk_fine[2]*fg_s[4] + k+1];
@@ -410,6 +413,9 @@ __global__ void query_fine(MatrixView<float> rgbs,
                                C2[4] * (xx - yy) * sh[k][8]);
         }
     }
+    // line 199 @ efficient-nerf-render-demo/example-app/example-app.cpp
+    rgbs(index_fine, k) = 1 / (1 + exp(-rgbs(index_fine, k)));
+    //rgbs(index_fine, k) = sh[k][0];
   }
 
 }
@@ -426,8 +432,8 @@ void NerfRender::inference(int N_rays, int N_samples_, int N_importance,
   // use cuda to speed up
 
   float weight_threashold = 1e-5;
-  tcnn::GPUMemory<float> weight_threasholds(N_rays);
-  get_weight_threasholds<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>> (weight_threasholds.data(), weights_coarse.data(), weight_threashold, N_samples_, N_rays);
+  //tcnn::GPUMemory<float> weight_threasholds(N_rays);
+  //get_weight_threasholds<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>> (weight_threasholds.data(), weights_coarse.data(), weight_threashold, N_samples_, N_rays);
 
   tcnn::GPUMatrixDynamic<float> rgbs(N_rays*N_samples_, 3, tcnn::RM);
   tcnn::GPUMemory<float> sigmas(N_rays*N_samples_);
@@ -438,15 +444,16 @@ void NerfRender::inference(int N_rays, int N_samples_, int N_importance,
                                                     weights_coarse.data(), 
                                                     xyz_.view(), 
                                                     dir_.view(), 
-                                                    weight_threasholds.data(), 
+                                                    weight_threashold, 
                                                     m_index_voxels_coarse.data(),
                                                     m_voxels_fine.data(),
                                                     m_cg_s, m_fg_s,
                                                     N_importance, N_samples_, N_rays);
-
+  
   tcnn::GPUMemory<float> weights(N_rays*N_samples_);
   sigma2weights(weights, z_vals, sigmas);
   sum_rgbs<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>> (rgb_fine.view(), rgbs.view(), weights.data(), N_samples_, N_rays);
+
 }
 
 void NerfRender::render_rays(int N_rays,
@@ -569,9 +576,15 @@ void NerfRender::render_frame(int w, int h, float theta, float phi, float radius
 
   get_image<<<div_round_up(N, maxThreadsPerBlock), maxThreadsPerBlock>>>(rgb_fine.view(), N, rgbs_dev);
   cudaMemcpy(rgbs_host, rgbs_dev, sizeof(unsigned int)*N*3, cudaMemcpyDeviceToHost);
+
+  unsigned char us_image[N*3];
+
+  for (int i = 0; i < N * 3; i++) {
+    us_image[i] = (unsigned char) (255.0 * rgbs_host[i]);        
+  }
   
   const char* filepath = "test.png";
-  stbi_write_png(filepath, h, w, 3, rgbs_host, 0);
+  stbi_write_png(filepath, h, w, 3, us_image, w*3);
   FILE * fp;
   if((fp = fopen("rgb.txt","wb"))==NULL){
     printf("cant open the file");
