@@ -221,7 +221,7 @@ __global__ void get_alphas(const int N_rays, const int N_samples, float* z_vals,
   if(j == N_samples-1)
     delta_coarse = 1e5;
   float alpha = 1.0 - exp(-delta_coarse * log(1 + std::exp(sigmas[i * N_samples + j])));
-  alpha = 1.0 - alpha + 1e-10;
+  //alpha = 1.0 - alpha + 1e-10;
   alphas[i * N_samples + j] = alpha;
 }
 
@@ -230,11 +230,11 @@ __global__ void get_cumprod(const int N_rays, const int N_samples, float* alphas
   if(j >= N_rays){
     return;
   }
-  alphas[j*N_samples+0] = 1.0;
-  float cumprod = 1.0;
-  for(int i=0; i<N_samples; i++){
-    cumprod = cumprod * alphas[j*N_samples+i];
-    alphas_cumprod[j*N_samples+i+1] = cumprod;
+  alphas_cumprod[j*N_samples+0] = 1.0;
+  //float cumprod = 1.0;
+  for(int i=1; i<N_samples; i++){
+    alphas_cumprod[j*N_samples+i] = alphas_cumprod[j*N_samples+i-1] * (1.0 - alphas[j*N_samples+i-1] + 1e-10);
+    //alphas_cumprod[j*N_samples+i] = cumprod;
   }
 }
 
@@ -456,6 +456,7 @@ void NerfRender::render_rays(int N_rays,
   int N_samples_coarse = N_samples;
   tcnn::GPUMemory<float> z_vals_coarse(N_samples_coarse);
   set_z_vals<<<div_round_up(N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (z_vals_coarse.data(), N_samples_coarse);
+
   int N_samples_fine = N_samples * N_importance;
   tcnn::GPUMemory<float> z_vals_fine(N_samples_fine);
   set_z_vals<<<div_round_up(N_samples_fine, maxThreadsPerBlock), maxThreadsPerBlock>>> (z_vals_fine.data(), N_samples_fine);
@@ -465,6 +466,7 @@ void NerfRender::render_rays(int N_rays,
   dim3 numBlocks_coarse(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_coarse, int(threadsPerBlock.y)));
   set_xyz<<<numBlocks_coarse, threadsPerBlock>>>(xyz_coarse.view(), rays_o.view(), rays_d.view(), z_vals_coarse.data(), N_rays, N_samples_coarse);
 
+
   tcnn::GPUMatrixDynamic<float> xyz_fine(N_rays*N_samples_fine, 3, tcnn::RM);
   dim3 numBlocks_fine(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_fine, int(threadsPerBlock.y)));
   set_xyz<<<numBlocks_fine, threadsPerBlock>>>(xyz_fine.view(), rays_o.view(), rays_d.view(), z_vals_fine.data(), N_rays, N_samples_fine);
@@ -472,8 +474,31 @@ void NerfRender::render_rays(int N_rays,
   // line 155-161 @ efficient-nerf-render-demo/example-app/example-app.cpp
   tcnn::GPUMatrixDynamic<int> ijk_coarse(N_rays*N_samples_coarse, 3, tcnn::RM);
   calc_index_coarse<<<div_round_up(N_rays*N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (ijk_coarse.view(), xyz_coarse.view(), m_cg_s[0], N_rays*N_samples_coarse);
+
   tcnn::GPUMemory<float> sigmas(N_rays*N_samples_coarse);
   query_coarse_sigma<<<div_round_up(N_rays*N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (sigmas.data(), m_sigma_voxels_coarse.data(), ijk_coarse.view(), m_cg_s, N_rays*N_samples_coarse);
+
+  /*
+  int N = N_rays*N_samples_coarse;
+  float* host_data = new float[N];
+  sigmas.copy_to_host(host_data);
+  for (int i=0; i<50; i++) {
+    std::cout << host_data[i] << std::endl;
+  }
+  */
+  
+  /*
+  int N = N_rays*N_samples_coarse;
+  float* host_data = new float[N * 3];
+  tcnn::MatrixView<float> view = sigmas.view();
+  cudaMemcpy(host_data, &view(0,0), N*3 * sizeof(float), cudaMemcpyDeviceToHost);
+  for (int i=0; i<50; i++) {
+    for (int j=0; j<3; j++) {
+      std::cout << host_data[i*3+j] << "\t";
+    }
+    std::cout << std::endl;
+  }
+  */
 
   // line 261 @ efficient-nerf-render-demo/example-app/example-app.cpp
   tcnn::GPUMemory<float> weights_coarse(N_rays*N_samples_coarse);
@@ -502,7 +527,7 @@ void NerfRender::generate_rays(int w,
   //dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
   //dim3 numBlocks(div_round_up(w * h, int(threadsPerBlock.x)), div_round_up(w, int(threadsPerBlock.y)));
   //set_dir<<<numBlocks, threadsPerBlock>>>(w, h, focal, c2w, rays_o.view(), rays_d.view());
-  //tlog::info() << c2w;
+  tlog::info() << c2w;
 }
 
 __global__ void get_image(MatrixView<float> rgb_final, const int N, float* rgbs){
@@ -525,17 +550,7 @@ void NerfRender::render_frame(int w, int h, float theta, float phi, float radius
   tcnn::GPUMatrixDynamic<float> rays_d(N, 3, tcnn::RM);
 
   generate_rays(w, h, focal, c2w, rays_o, rays_d);
-  /*
-  float* host_data = new float[N * 3];
-  tcnn::MatrixView<float> view = rays_d.view();
-  cudaMemcpy(host_data, &view(0,0), N*3 * sizeof(float), cudaMemcpyDeviceToHost);
-  for (int i=0; i<N; i++) {
-    for (int j=0; j<3; j++) {
-      std::cout << host_data[i*3+j] << "\t";
-    }
-    std::cout << std::endl;
-  }
-  */
+  
 
   tcnn::GPUMatrixDynamic<float> rgb_fine(N, 3, tcnn::RM);
   render_rays(N, rgb_fine, rays_o, rays_d, 128);
