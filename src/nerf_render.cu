@@ -496,10 +496,13 @@ void NerfRender::generate_rays(int w,
   // TODO
   // line 287-292 @ efficient-nerf-render-demo/example-app/example-app.cpp
   // use cuda to speed up
-  dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
-  dim3 numBlocks(div_round_up(w * h, int(threadsPerBlock.x)), div_round_up(w, int(threadsPerBlock.y)));
-  set_dir<<<numBlocks, threadsPerBlock>>>(w, h, focal, c2w, rays_o.view(), rays_d.view());
-  tlog::info() << c2w;
+  int N = w * h;
+  set_rays_o<<<div_round_up(N, maxThreadsPerBlock), maxThreadsPerBlock>>>(rays_o.view(), c2w.block<3, 1>(0, 3), N);
+  set_rays_d<<<div_round_up(N, maxThreadsPerBlock), maxThreadsPerBlock>>>(rays_d.view(), c2w.block<3, 3>(0, 0), focal, w, h);
+  //dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
+  //dim3 numBlocks(div_round_up(w * h, int(threadsPerBlock.x)), div_round_up(w, int(threadsPerBlock.y)));
+  //set_dir<<<numBlocks, threadsPerBlock>>>(w, h, focal, c2w, rays_o.view(), rays_d.view());
+  //tlog::info() << c2w;
 }
 
 __global__ void get_image(MatrixView<float> rgb_final, const int N, float* rgbs){
@@ -513,7 +516,7 @@ __global__ void get_image(MatrixView<float> rgb_final, const int N, float* rgbs)
 }
 
 void NerfRender::render_frame(int w, int h, float theta, float phi, float radius) {
-  auto c2w = pose_spherical(90, -30, 4);
+  auto c2w = pose_spherical(theta, phi, radius);
   float focal = 0.5 * w / std::tan(0.5*0.6911112070083618);
   int N = w * h;  // number of pixels
   // initial points corresponding to pixels, in world coordination
@@ -522,6 +525,17 @@ void NerfRender::render_frame(int w, int h, float theta, float phi, float radius
   tcnn::GPUMatrixDynamic<float> rays_d(N, 3, tcnn::RM);
 
   generate_rays(w, h, focal, c2w, rays_o, rays_d);
+  /*
+  float* host_data = new float[N * 3];
+  tcnn::MatrixView<float> view = rays_d.view();
+  cudaMemcpy(host_data, &view(0,0), N*3 * sizeof(float), cudaMemcpyDeviceToHost);
+  for (int i=0; i<N; i++) {
+    for (int j=0; j<3; j++) {
+      std::cout << host_data[i*3+j] << "\t";
+    }
+    std::cout << std::endl;
+  }
+  */
 
   tcnn::GPUMatrixDynamic<float> rgb_fine(N, 3, tcnn::RM);
   render_rays(N, rgb_fine, rays_o, rays_d, 128);
