@@ -31,6 +31,20 @@ namespace fs = filesystem;
 
 NGP_NAMESPACE_BEGIN
 
+__device__ __constant__ const float C0 = 0.28209479177387814;
+__device__ __constant__ const float C1 = 0.4886025119029199;
+__device__ __constant__ const float C2[] = {
+    1.0925484305920792,
+    -1.0925484305920792,
+    0.31539156525252005,
+    -1.0925484305920792,
+    0.5462742152960396
+};
+
+#define _SIGMOID(x) (1 / (1 + expf(-(x))))
+#define _SOFTPLUS_M1(x) (logf(1 + expf((x) - 1)))
+
+
 Eigen::Matrix<float, 4, 4> trans_t(float t){
   Eigen::Matrix<float, 4, 4> mat;
   mat << 1.0, 0.0, 0.0, 0.0,
@@ -312,10 +326,56 @@ __global__ void get_weight_threasholds(float* weight_threasholds, float* weights
   }
 }
 
-__global__ void query_fine(MatrixView<float> rgbs, 
-                           float* sigmas,
-                           float* weights_coarse, 
-                           MatrixView<float> xyz_, 
+__device__ __inline__ void precalc_basis(const float* __restrict__ dir, float* __restrict__ out) {
+  const float x = dir[0], y = dir[1], z = dir[2];
+  const float xx = x * x, yy = y * y, zz = z * z;
+  const float xy = x * y, yz = y * z, xz = x * z;
+  out[0] = C0;
+  out[1] = -C1 * y;
+  out[2] = C1 * z;
+  out[3] = -C1 * x;
+  out[4] = C2[0] * xy;
+  out[5] = C2[1] * yz;
+  out[6] = C2[2] * (2.0 * zz - xx - yy);
+  out[7] = C2[3] * xz;
+  out[8] = C2[4] * (xx - yy);
+}
+
+__device__ __inline__ void calc_index_(const float* __restrict__ xyz, 
+                                        int* __restrict__ ijk_, 
+                                        int grid_coarse) {
+  float coord_scope = 3.0;
+  float xyz_min = -coord_scope;
+  float xyz_max = coord_scope;
+  float xyz_scope = xyz_max - xyz_min;
+
+  for (int i=0; i<3; i++) {
+    ijk_[i] = int((xyz[i] - xyz_min) / xyz_scope * grid_coarse);
+    ijk_[i] = ijk_[i] < 0? 0 : ijk_[i];
+    ijk_[i] = ijk_[i] > grid_coarse-1? grid_coarse-1 : ijk_[i];
+  }
+}
+
+__device__ __inline__ void _set_xyz(const float* __restrict__ rays_o, 
+                                    const float* __restrict__ dir, 
+                                    const float z_val, 
+                                    float* __restrict__ out) {
+
+  out[0] = rays_o[0] + dir[0] * z_val;
+  out[1] = rays_o[1] + dir[1] * z_val;
+  out[2] = rays_o[2] + dir[2] * z_val;
+}
+
+__device__ __inline__ float _z_vals(const int index, const int N) {
+
+  float near = 2.0; // val_dataset.near
+  float far = 6.0; // val_dataset.far
+  return near + (far-near) / (N-1) * index;
+}
+
+__global__ void query_fine(MatrixView<float> rgb_final, 
+                           float* sigma_voxels_coarse, 
+                           MatrixView<float> rays_o, 
                            MatrixView<float> dir_, 
                            float weight_threashold, 
                            long* index_voxels_coarse,
@@ -324,125 +384,151 @@ __global__ void query_fine(MatrixView<float> rgbs,
                            Eigen::Matrix<int,5,1> fg_s,
                            int N_importance, int N_samples_fine, int N_rays) {
   const int i = threadIdx.x + blockIdx.x * blockDim.x;
-  const int j = threadIdx.y + blockIdx.y * blockDim.y;
-  //const int N_samples_coarse = N_samples_fine / N_importance;
-  const int index_fine = i*N_samples_fine + j;
-  const int index_coarse = index_fine / N_importance;
-  if (i >= N_rays || j >= N_samples_fine) {
+  //const int j = threadIdx.y + blockIdx.y * blockDim.y;
+  
+  if (i >= N_rays) {
     return;
   }
-  // line 264 @ efficient-nerf-render-demo/example-app/example-app.cpp
-  if (weights_coarse[index_coarse] < weight_threashold) {
-    float sigma_default = -20.0;
-    sigmas[index_fine] = sigma_default;
-    rgbs(index_fine, 0) = 1.0;
-    rgbs(index_fine, 1) = 1.0;
-    rgbs(index_fine, 2) = 1.0;
-    return;
-  }
-
-  // calc_index_coarse
   
-  int grid_coarse = cg_s[0];
-  float coord_scope = 3.0;
-  float xyz_min = -coord_scope;
-  float xyz_max = coord_scope;
-  float xyz_scope = xyz_max - xyz_min;
+  const int N_samples_coarse = N_samples_fine / N_importance;
+  const int grid_coarse = cg_s[0];
 
-  int ijk_coarse[3];
+  float light_intensity = 1.f;
+  float weights_sum = 0.f;
+  for (int i_=0; i_<N_samples_coarse; i_++) {
+    
+    //int index_fine = i*N_samples_fine + j;
+    //int index_coarse = i * N_samples_coarse + i_;
 
-  // query_coarse_index
-  for (int i=0; i<3; i++) {
-    ijk_coarse[i] = int((xyz_(index_fine, i) - xyz_min) / xyz_scope * grid_coarse);
-    ijk_coarse[i] = ijk_coarse[i] < 0? 0 : ijk_coarse[i];
-    ijk_coarse[i] = ijk_coarse[i] > grid_coarse-1? grid_coarse-1 : ijk_coarse[i];
-  }
-  int coarse_index = index_voxels_coarse[ijk_coarse[0]*cg_s[1]*cg_s[2]+ijk_coarse[1]*cg_s[2]+ijk_coarse[2]];
+    float xyz_coarse[3];
+    int ijk_coarse_[3];
+    float vdir[] = {dir_(i, 0), dir_(i, 1), dir_(i, 2)};
+    float rays_o_[] = {rays_o(i, 0), rays_o(i, 1), rays_o(i, 2)};
+    _set_xyz(rays_o_, vdir, _z_vals(i_, N_samples_coarse), xyz_coarse);
+    calc_index_(xyz_coarse, ijk_coarse_, grid_coarse);
 
-  // calc_index_fine
+    float sigmas = sigma_voxels_coarse[ijk_coarse_[0]*cg_s[1]*cg_s[2] + ijk_coarse_[1]*cg_s[2] + ijk_coarse_[2]];
   
-  int grid_fine = 3;
-  int res_fine = grid_coarse * grid_fine;
-
-  int ijk_fine[3];
-
-  ijk_fine[0] = int((xyz_(index_fine, 0) - xyz_min) / xyz_scope * res_fine) % grid_fine;
-  ijk_fine[1] = int((xyz_(index_fine, 1) - xyz_min) / xyz_scope * res_fine) % grid_fine;
-  ijk_fine[2] = int((xyz_(index_fine, 2) - xyz_min) / xyz_scope * res_fine) % grid_fine;
-
-  // line 195 @ efficient-nerf-render-demo/example-app/example-app.cpp
-  sigmas[index_fine] = voxels_fine[coarse_index*fg_s[1]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[0]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[1]*fg_s[3]*fg_s[4] + ijk_fine[2]*fg_s[4]];
-
-  const int deg = 2;
-  const int dim_sh = (deg + 1) * (deg + 1);
-  float sh[3][dim_sh];
-
-  for (int k=0; k<fg_s[4]-1; k++) {
-    sh[k/dim_sh][k%dim_sh] = voxels_fine[coarse_index*fg_s[1]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[0]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[1]*fg_s[3]*fg_s[4] + ijk_fine[2]*fg_s[4] + k+1];
-  }
-
-  // eval_sh
-  float C0 = 0.28209479177387814;
-  float C1 = 0.4886025119029199;
-  float C2[5] = {1.0925484305920792, -1.0925484305920792, 0.31539156525252005, -1.0925484305920792, 0.5462742152960396};
-
-  float x = dir_(i, 0);
-  float y = dir_(i, 1);
-  float z = dir_(i, 2);
-
-  float xx = x * x;
-  float yy = y * y;
-  float zz = z * z;
-  float xy = x * y;
-  float yz = y * z;
-  float xz = x * z;
-  
-  for (int k=0; k<3; k++) {
-    rgbs(index_fine, k) = C0 * sh[k][0];
-    if (deg > 0) {
-      rgbs(index_fine, k) = (rgbs(index_fine, k) -    \
-                             C1 * y * sh[k][1] +      \
-                             C1 * z * sh[k][2] -      \
-                             C1 * x * sh[k][3]);
-      if (deg > 1) {
-        rgbs(index_fine, k) = (rgbs(index_fine, k) +                      \
-                               C2[0] * xy * sh[k][4] +                    \
-                               C2[1] * yz * sh[k][5] +                    \
-                               C2[2] * (2.0 * zz - xx - yy) * sh[k][6] +  \
-                               C2[3] * xz * sh[k][7] +                    \
-                               C2[4] * (xx - yy) * sh[k][8]);
-        }
+    // line 264 @ efficient-nerf-render-demo/example-app/example-app.cpp
+    if (sigmas < weight_threashold) {
+      //float sigma_default = -20.0;
+      //sigmas[index_fine] = sigma_default;
+      //weights[index_fine] = 0.0;
+      //rgbs(index_fine, 0) = 1.0;
+      //rgbs(index_fine, 1) = 1.0;
+      //rgbs(index_fine, 2) = 1.0;
+      continue;
     }
-    // line 199 @ efficient-nerf-render-demo/example-app/example-app.cpp
-    rgbs(index_fine, k) = 1 / (1 + exp(-rgbs(index_fine, k)));
-    //rgbs(index_fine, k) = sh[k][0];
+
+    for (int j_=0; j_<N_importance; j_++) {
+      int j = i_*N_importance + j_;
+      //int index_fine = i*N_samples_fine + index_coarse*N_importance + j;
+
+      // calc_index_coarse
+  
+      
+      float coord_scope = 3.0;
+      float xyz_min = -coord_scope;
+      float xyz_max = coord_scope;
+      float xyz_scope = xyz_max - xyz_min;
+
+      int ijk_coarse[3];
+      float xyz_[3];
+      _set_xyz(rays_o_, vdir, _z_vals(j, N_samples_fine), xyz_);
+
+      // query_coarse_index
+      calc_index_(xyz_, ijk_coarse, grid_coarse);
+
+      int coarse_index = index_voxels_coarse[ijk_coarse[0]*cg_s[1]*cg_s[2]+ijk_coarse[1]*cg_s[2]+ijk_coarse[2]];
+
+      // calc_index_fine
+  
+      int grid_fine = 3;
+      int res_fine = grid_coarse * grid_fine;
+
+      int ijk_fine[3];
+
+      ijk_fine[0] = int((xyz_[0] - xyz_min) / xyz_scope * res_fine) % grid_fine;
+      ijk_fine[1] = int((xyz_[1] - xyz_min) / xyz_scope * res_fine) % grid_fine;
+      ijk_fine[2] = int((xyz_[2] - xyz_min) / xyz_scope * res_fine) % grid_fine;
+
+      // line 195 @ efficient-nerf-render-demo/example-app/example-app.cpp
+      float sigma = voxels_fine[coarse_index*fg_s[1]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[0]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[1]*fg_s[3]*fg_s[4] + ijk_fine[2]*fg_s[4]];
+
+      const int deg = 2;
+      const int dim_sh = (deg + 1) * (deg + 1);
+      float sh[3][dim_sh];
+
+      for (int k=0; k<fg_s[4]-1; k++) {
+        sh[k/dim_sh][k%dim_sh] = voxels_fine[coarse_index*fg_s[1]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[0]*fg_s[2]*fg_s[3]*fg_s[4] + ijk_fine[1]*fg_s[3]*fg_s[4] + ijk_fine[2]*fg_s[4] + k+1];
+      }
+
+      // eval_sh
+      float basis_fn[9];
+    
+      precalc_basis(vdir, basis_fn);
+
+
+      float delta_coarse;
+      if(j < N_samples_fine-1) 
+        delta_coarse = _z_vals(j+1, N_samples_fine) - _z_vals(j, N_samples_fine);
+      if(j == N_samples_fine-1)
+        delta_coarse = 1e5;
+      float att = expf(-delta_coarse * _SOFTPLUS_M1(sigma));
+      float weight = light_intensity * (1.f - att);
+      weights_sum += weight;
+      light_intensity *= att;
+
+      for (int t=0; t<3; t++) {
+        float tmp = 0.0;
+        for (int k=0; k<9; k++) {
+          tmp += basis_fn[k] * sh[t][k];
+        }
+        rgb_final(i, t) += _SIGMOID(tmp) * weight;
+      }
+
+      float stop_thresh = 0.01;
+      if (light_intensity <= stop_thresh) {
+        break;
+      }
+    }
+
+    
+
   }
 
+  rgb_final(i, 0) = rgb_final(i, 0) + 1 - weights_sum;
+  rgb_final(i, 1) = rgb_final(i, 1) + 1 - weights_sum;
+  rgb_final(i, 2) = rgb_final(i, 2) + 1 - weights_sum;
+  
 }
 
 void NerfRender::inference(int N_rays, int N_samples_, int N_importance,
                            tcnn::GPUMatrixDynamic<float>& rgb_fine,
-                           tcnn::GPUMatrixDynamic<float>& xyz_,
+                           tcnn::GPUMatrixDynamic<float>& rays_o,
                            tcnn::GPUMatrixDynamic<float>& dir_,
                            tcnn::GPUMemory<float>& z_vals,    
-                           tcnn::GPUMemory<float>& weights_coarse) {
+                           tcnn::GPUMemory<float>& sigma_voxels_coarse) {
   std::cout << "inference" << std::endl;
   // TODO
   // line 263-271 & 186-206 @ efficient-nerf-render-demo/example-app/example-app.cpp
   // use cuda to speed up
 
   float weight_threashold = 1e-5;
+
+  tcnn::GPUMemory<float> weights(N_rays*N_samples_);
+  //sigma2weights(weights, z_vals, sigmas);
+
   //tcnn::GPUMemory<float> weight_threasholds(N_rays);
   //get_weight_threasholds<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>> (weight_threasholds.data(), weights_coarse.data(), weight_threashold, N_samples_, N_rays);
 
   tcnn::GPUMatrixDynamic<float> rgbs(N_rays*N_samples_, 3, tcnn::RM);
-  tcnn::GPUMemory<float> sigmas(N_rays*N_samples_);
+  //tcnn::GPUMemory<float> sigmas(N_rays*N_samples_);
   dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
   dim3 numBlocks_coarse(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_, int(threadsPerBlock.y)));
-  query_fine<<<numBlocks_coarse, threadsPerBlock>>>(rgbs.view(), 
-                                                    sigmas.data(), 
-                                                    weights_coarse.data(), 
-                                                    xyz_.view(), 
+  query_fine<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>>(rgb_fine.view(),
+                                                    sigma_voxels_coarse.data(), 
+                                                    rays_o.view(), 
                                                     dir_.view(), 
                                                     weight_threashold, 
                                                     m_index_voxels_coarse.data(),
@@ -450,9 +536,8 @@ void NerfRender::inference(int N_rays, int N_samples_, int N_importance,
                                                     m_cg_s, m_fg_s,
                                                     N_importance, N_samples_, N_rays);
   
-  tcnn::GPUMemory<float> weights(N_rays*N_samples_);
-  sigma2weights(weights, z_vals, sigmas);
-  sum_rgbs<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>> (rgb_fine.view(), rgbs.view(), weights.data(), N_samples_, N_rays);
+  
+  //sum_rgbs<<<div_round_up(N_rays, maxThreadsPerBlock), maxThreadsPerBlock>>> (rgb_fine.view(), rgbs.view(), weights.data(), N_samples_, N_rays);
 
 }
 
@@ -464,30 +549,30 @@ void NerfRender::render_rays(int N_rays,
                              int N_importance=5, 
                              float perturb=0.) {
   std::cout << "render_rays" << std::endl;
-  int N_samples_coarse = N_samples;
-  tcnn::GPUMemory<float> z_vals_coarse(N_samples_coarse);
-  set_z_vals<<<div_round_up(N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (z_vals_coarse.data(), N_samples_coarse);
+  //int N_samples_coarse = N_samples;
+  //tcnn::GPUMemory<float> z_vals_coarse(N_samples_coarse);
+  //set_z_vals<<<div_round_up(N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (z_vals_coarse.data(), N_samples_coarse);
 
   int N_samples_fine = N_samples * N_importance;
   tcnn::GPUMemory<float> z_vals_fine(N_samples_fine);
-  set_z_vals<<<div_round_up(N_samples_fine, maxThreadsPerBlock), maxThreadsPerBlock>>> (z_vals_fine.data(), N_samples_fine);
+  //set_z_vals<<<div_round_up(N_samples_fine, maxThreadsPerBlock), maxThreadsPerBlock>>> (z_vals_fine.data(), N_samples_fine);
 
-  tcnn::GPUMatrixDynamic<float> xyz_coarse(N_rays*N_samples_coarse, 3, tcnn::RM);
-  dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
-  dim3 numBlocks_coarse(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_coarse, int(threadsPerBlock.y)));
-  set_xyz<<<numBlocks_coarse, threadsPerBlock>>>(xyz_coarse.view(), rays_o.view(), rays_d.view(), z_vals_coarse.data(), N_rays, N_samples_coarse);
+  //tcnn::GPUMatrixDynamic<float> xyz_coarse(N_rays*N_samples_coarse, 3, tcnn::RM);
+  //dim3 threadsPerBlock(maxThreadsPerBlock/32, 32);
+  //dim3 numBlocks_coarse(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_coarse, int(threadsPerBlock.y)));
+  //set_xyz<<<numBlocks_coarse, threadsPerBlock>>>(xyz_coarse.view(), rays_o.view(), rays_d.view(), z_vals_coarse.data(), N_rays, N_samples_coarse);
 
 
-  tcnn::GPUMatrixDynamic<float> xyz_fine(N_rays*N_samples_fine, 3, tcnn::RM);
-  dim3 numBlocks_fine(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_fine, int(threadsPerBlock.y)));
-  set_xyz<<<numBlocks_fine, threadsPerBlock>>>(xyz_fine.view(), rays_o.view(), rays_d.view(), z_vals_fine.data(), N_rays, N_samples_fine);
+  //tcnn::GPUMatrixDynamic<float> xyz_fine(N_rays*N_samples_fine, 3, tcnn::RM);
+  //dim3 numBlocks_fine(div_round_up(N_rays, int(threadsPerBlock.x)), div_round_up(N_samples_fine, int(threadsPerBlock.y)));
+  //set_xyz<<<numBlocks_fine, threadsPerBlock>>>(xyz_fine.view(), rays_o.view(), rays_d.view(), z_vals_fine.data(), N_rays, N_samples_fine);
 
   // line 155-161 @ efficient-nerf-render-demo/example-app/example-app.cpp
-  tcnn::GPUMatrixDynamic<int> ijk_coarse(N_rays*N_samples_coarse, 3, tcnn::RM);
-  calc_index_coarse<<<div_round_up(N_rays*N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (ijk_coarse.view(), xyz_coarse.view(), m_cg_s[0], N_rays*N_samples_coarse);
+  //tcnn::GPUMatrixDynamic<int> ijk_coarse(N_rays*N_samples_coarse, 3, tcnn::RM);
+  //calc_index_coarse<<<div_round_up(N_rays*N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (ijk_coarse.view(), xyz_coarse.view(), m_cg_s[0], N_rays*N_samples_coarse);
 
-  tcnn::GPUMemory<float> sigmas(N_rays*N_samples_coarse);
-  query_coarse_sigma<<<div_round_up(N_rays*N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (sigmas.data(), m_sigma_voxels_coarse.data(), ijk_coarse.view(), m_cg_s, N_rays*N_samples_coarse);
+  //tcnn::GPUMemory<float> sigmas(N_rays*N_samples_coarse);
+  //query_coarse_sigma<<<div_round_up(N_rays*N_samples_coarse, maxThreadsPerBlock), maxThreadsPerBlock>>> (sigmas.data(), m_sigma_voxels_coarse.data(), ijk_coarse.view(), m_cg_s, N_rays*N_samples_coarse);
 
   /*
   int N = N_rays*N_samples_coarse;
@@ -512,10 +597,10 @@ void NerfRender::render_rays(int N_rays,
   */
 
   // line 261 @ efficient-nerf-render-demo/example-app/example-app.cpp
-  tcnn::GPUMemory<float> weights_coarse(N_rays*N_samples_coarse);
-  sigma2weights(weights_coarse, z_vals_coarse, sigmas);
+  //tcnn::GPUMemory<float> weights_coarse(N_rays*N_samples_coarse);
+  //sigma2weights(weights_coarse, z_vals_coarse, sigmas);
 
-  inference(N_rays, N_samples_fine, N_importance, rgb_fine, xyz_fine, rays_d, z_vals_fine, weights_coarse);
+  inference(N_rays, N_samples_fine, N_importance, rgb_fine, rays_o, rays_d, z_vals_fine, m_sigma_voxels_coarse);
 
   
   //float host_data[N_samples_fine];
