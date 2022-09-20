@@ -35,8 +35,8 @@ class NerfRender {
   void load_nerf_tree(long* index_voxels_coarse_h,
                       float* sigma_voxels_coarse_h,
                       float* voxels_fine_h,
-                      const int64_t* cg_s,
-                      const int64_t* fg_s);
+                      uint64_t* cg_s,
+                      uint64_t* fg_s);
 
   // render !
   void render_frame(int w, int h, float theta, float phi, float radius);  // render an image according to camera outer parameters.
@@ -58,9 +58,10 @@ class NerfRender {
                  tcnn::GPUMatrixDynamic<float>& rgb_fine,
                  tcnn::GPUMatrixDynamic<float>& xyz_,
                  tcnn::GPUMatrixDynamic<float>& dir_,
-                 tcnn::GPUMemory<float>& z_vals,
                  tcnn::GPUMemory<float>& weights_coarse);
   void load_snapshot(const std::string& filepath_string);
+
+  void set_resolution(const int w, const int h);
 
  private:
   std::vector<float> m_aabb_v;
@@ -89,6 +90,11 @@ class NerfRender {
   filesystem::path m_network_config_path;
   nlohmann::json m_network_config;
   std::shared_ptr<NerfNetwork<precision_t>> m_nerf_network;
+
+  // Middle variables
+  tcnn::GPUMatrixDynamic<float> m_rays_o;
+  tcnn::GPUMatrixDynamic<float> m_rays_d;
+  tcnn::GPUMatrixDynamic<float> m_rgb_fine;
 };
 
 NGP_NAMESPACE_END
