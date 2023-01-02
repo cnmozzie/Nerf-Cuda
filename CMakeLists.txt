@@ -257,6 +257,7 @@ set(SOURCES
     src/nerf_render.cu
     src/render_buffer.cu
     src/dlss.cu
+    src/common_device.cu
 )
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

@@ -124,4 +124,9 @@ enum class EImageDataType {
 	Float,
 };
 
+struct Ray {
+	Eigen::Vector3f o;
+	Eigen::Vector3f d;
+};
+
 NGP_NAMESPACE_END

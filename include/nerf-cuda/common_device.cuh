@@ -113,4 +113,100 @@ inline NGP_HOST_DEVICE float4 to_float4(const Eigen::Vector4f& x) {
 	return {x.x(), x.y(), x.z(), x.w()};
 }
 
+Eigen::Matrix<float, 4, 4> log_space_lerp(const Eigen::Matrix<float, 4, 4>& begin, const Eigen::Matrix<float, 4, 4>& end, float t);
+
+inline NGP_HOST_DEVICE Ray pixel_to_ray(
+	const Eigen::Vector2i& pixel,
+	const Eigen::Vector2i& resolution,
+	const Eigen::Vector2f& focal_length,
+	const Eigen::Matrix<float, 3, 4>& camera_matrix,
+	const Eigen::Vector2f& screen_center,
+	const Eigen::Vector3f& parallax_shift,
+	float near_distance = 0.0f
+) {
+	
+	// snap_to_pixel_centers = false
+	Eigen::Vector2f offset = ld_random_pixel_offset(0);
+	Eigen::Vector2f uv = (pixel.cast<float>() + offset).cwiseQuotient(resolution.cast<float>());
+
+	Eigen::Vector3f dir;
+	// no distortion
+	dir = {
+		(uv.x() - screen_center.x()) * (float)resolution.x() / focal_length.x(),
+		(uv.y() - screen_center.y()) * (float)resolution.y() / focal_length.y(),
+		1.0f
+	};
+
+	Eigen::Vector3f head_pos = {parallax_shift.x(), parallax_shift.y(), 0.f};
+	dir -= head_pos * parallax_shift.z(); // we could use focus_z here in the denominator. for now, we pack m_scale in here.
+	dir = camera_matrix.block<3, 3>(0, 0) * dir;
+
+	Eigen::Vector3f origin = camera_matrix.block<3, 3>(0, 0) * head_pos + camera_matrix.col(3);
+	
+	// aperture_size = 0.0f
+	
+	origin += dir * near_distance;
+
+	return {origin, dir};
+}
+
+inline NGP_HOST_DEVICE Eigen::Vector2f pos_to_pixel(
+	const Eigen::Vector3f& pos,
+	const Eigen::Vector2i& resolution,
+	const Eigen::Vector2f& focal_length,
+	const Eigen::Matrix<float, 3, 4>& camera_matrix,
+	const Eigen::Vector2f& screen_center,
+	const Eigen::Vector3f& parallax_shift
+) {
+	// Express ray in terms of camera frame
+	Eigen::Vector3f head_pos = {parallax_shift.x(), parallax_shift.y(), 0.f};
+	Eigen::Vector3f origin = camera_matrix.block<3, 3>(0, 0) * head_pos + camera_matrix.col(3);
+
+	Eigen::Vector3f dir = pos - origin;
+	dir = camera_matrix.block<3, 3>(0, 0).inverse() * dir;
+	dir /= dir.z();
+	dir += head_pos * parallax_shift.z();
+
+	// no distortion
+
+	return {
+		dir.x() * focal_length.x() + screen_center.x() * resolution.x(),
+		dir.y() * focal_length.y() + screen_center.y() * resolution.y(),
+	};
+}
+
+
+inline NGP_HOST_DEVICE Eigen::Vector2f motion_vector_3d(
+	const uint32_t sample_index,
+	const Eigen::Vector2i& pixel,
+	const Eigen::Vector2i& resolution,
+	const Eigen::Vector2f& focal_length,
+	const Eigen::Matrix<float, 3, 4>& camera,
+	const Eigen::Matrix<float, 3, 4>& prev_camera,
+	const Eigen::Vector2f& screen_center,
+	const Eigen::Vector3f& parallax_shift,
+	const float depth
+) {
+	
+	Ray ray = pixel_to_ray(
+		pixel,
+		resolution,
+		focal_length,
+		camera,
+		screen_center,
+		parallax_shift
+	);
+
+	Eigen::Vector2f prev_pixel = pos_to_pixel(
+		ray.o + ray.d * depth,
+		resolution,
+		focal_length,
+		prev_camera,
+		screen_center,
+		parallax_shift
+	);
+
+	return prev_pixel - (pixel.cast<float>() + ld_random_pixel_offset(sample_index));
+}
+
 NGP_NAMESPACE_END

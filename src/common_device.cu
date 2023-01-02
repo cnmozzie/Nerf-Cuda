@@ -12,8 +12,8 @@
  *  @author Thomas Müller, NVIDIA
  */
 
-#include <neural-graphics-primitives/common_device.cuh>
-#include <neural-graphics-primitives/tinyexr_wrapper.h>
+#include <nerf-cuda/common_device.cuh>
+//#include <nerf-cuda/tinyexr_wrapper.h>
 
 #include <unsupported/Eigen/MatrixFunctions>
 
@@ -24,7 +24,18 @@ using namespace tcnn;
 
 NGP_NAMESPACE_BEGIN
 
+Matrix<float, 4, 4> log_space_lerp(const Matrix<float, 4, 4>& begin, const Matrix<float, 4, 4>& end, float t) {
+	Matrix4f A = Matrix4f::Identity();
+	A.block<4,4>(0,0) = begin;
+	Matrix4f B = Matrix4f::Identity();
+	B.block<4,4>(0,0) = end;
 
+	Matrix4f log_space_a_to_b = (B * A.inverse()).log();
+
+	return ((log_space_a_to_b * t).exp() * A).block<4,4>(0,0);
+}
+
+/*
 Matrix<float, 3, 4> log_space_lerp(const Matrix<float, 3, 4>& begin, const Matrix<float, 3, 4>& end, float t) {
 	Matrix4f A = Matrix4f::Identity();
 	A.block<3,4>(0,0) = begin;
@@ -78,5 +89,5 @@ GPUMemory<float> load_stbi(const std::string& filename, int& width, int& height)
 
 	return result;
 }
-
+*/
 NGP_NAMESPACE_END
